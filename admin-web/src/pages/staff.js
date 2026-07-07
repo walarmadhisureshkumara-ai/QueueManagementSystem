@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { io } from "socket.io-client";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BOC BANK · Queue Management System · Staff Dashboard
@@ -46,47 +47,7 @@ const STAFF_ROSTER = [
   { id: "S07", name: "L. Dissanayake",  counter: "CARD", role: "Card Officer",    pin: "6620" },
 ];
 
-// ── Seed tokens per counter ───────────────────────────────────────────────────
-function seedTokens() {
-  return {
-    CD:   [
-      { id:"CD-001", customer:"Nimal Perera",     status:"completed", time:"09:05", priority:false, note:"" },
-      { id:"CD-002", customer:"Kamala Silva",      status:"serving",   time:"09:18", priority:true,  note:"Elderly customer" },
-      { id:"CD-003", customer:"Ranjit Fernando",   status:"waiting",   time:"09:25", priority:false, note:"" },
-      { id:"CD-004", customer:"Saman Dias",        status:"waiting",   time:"09:31", priority:false, note:"" },
-    ],
-    CW:   [
-      { id:"CW-001", customer:"Priya Wijeratne",   status:"serving",   time:"09:20", priority:true,  note:"Differently-abled" },
-      { id:"CW-002", customer:"Lalith Gunaratne",  status:"waiting",   time:"09:28", priority:false, note:"" },
-    ],
-    CS:   [
-      { id:"CS-001", customer:"Tharushi De Silva", status:"completed", time:"09:10", priority:false, note:"" },
-      { id:"CS-002", customer:"Buddhika Weerasinghe",status:"waiting", time:"09:35", priority:false, note:"" },
-    ],
-    AO:   [
-      { id:"AO-001", customer:"Menaka Jayasinghe", status:"waiting",   time:"09:15", priority:false, note:"" },
-      { id:"AO-002", customer:"Chamara Bandara",   status:"waiting",   time:"09:40", priority:false, note:"" },
-    ],
-    LS:   [
-      { id:"LS-001", customer:"Roshan Kumara",     status:"serving",   time:"09:22", priority:false, note:"Home loan inquiry" },
-    ],
-    CHQ:  [
-      { id:"CHQ-001", customer:"Dilrukshi Ranasinghe", status:"waiting", time:"09:30", priority:false, note:"" },
-    ],
-    CARD: [
-      { id:"CARD-001", customer:"Indika Madusanka", status:"serving",   time:"09:17", priority:false, note:"Lost debit card" },
-      { id:"CARD-002", customer:"Sarathi Hettige",  status:"waiting",   time:"09:38", priority:false, note:"" },
-    ],
-  };
-}
-
-function seedNotifications(counterCode) {
-  return [
-    { id:1, type:"info",    msg:`Priority customer in your queue — please assist promptly.`, time:"09:38", read:false },
-    { id:2, type:"success", msg:`Token ${counterCode}-001 completed successfully.`,           time:"09:22", read:true  },
-    { id:3, type:"info",    msg:"System maintenance scheduled at 18:00 today.",               time:"08:00", read:true  },
-  ];
-}
+// (Seed data removed — tokens now loaded from backend API)
 
 const STATUS_META = {
   waiting:   { label:"Waiting",   color:C.amber, bg:C.amberSoft },
@@ -331,12 +292,15 @@ function LoginScreen({ onLogin }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // STAFF DASHBOARD — scoped entirely to staff.counter
 // ─────────────────────────────────────────────────────────────────────────────
+const API = "http://localhost:3000";
+
 function StaffDashboard({ staff, onLogout }) {
   const counter     = COUNTERS[staff.counter];
-  const allTokens   = seedTokens();
 
-  const [tokens, setTokens]           = useState(allTokens[staff.counter] || []);
-  const [notifications, setNotifs]    = useState(seedNotifications(staff.counter));
+  const [tokens, setTokens]           = useState([]);
+  const [notifications, setNotifs]    = useState([
+    { id:1, type:"info", msg:`${counter.label} counter is active. Waiting for customers...`, time:"00:00", read:false },
+  ]);
   const [activeTab, setActiveTab]     = useState("queue");
   const [filter, setFilter]           = useState("all");
   const [showNotif, setShowNotif]     = useState(false);
@@ -345,7 +309,90 @@ function StaffDashboard({ staff, onLogout }) {
   const [toast, setToast]             = useState(null);
   const [time, setTime]               = useState(new Date());
   const [isOpen, setIsOpen]           = useState(true);
+  const [dbCounterId, setDbCounterId] = useState(null);
   const notifRef                      = useRef(null);
+  const socketRef                     = useRef(null);
+
+  // Map staff counter code to database counter_id on login
+  useEffect(() => {
+    fetch(`${API}/counters`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          const match = data.data.find(c =>
+            c.counter_name?.toLowerCase().includes(counter.label.toLowerCase())
+          );
+          if (match) setDbCounterId(match.counter_id);
+        }
+      })
+      .catch(console.error);
+  }, [staff]);
+
+  // Socket.io real-time listener
+  useEffect(() => {
+    socketRef.current = io(API);
+    socketRef.current.on("connect", () => console.log("Staff socket connected"));
+
+    // Listen only on this staff's assigned counter channel
+    const channel = `NEW_STAFF_NOTIFICATION_${dbCounterId}`;
+    socketRef.current.on(channel, (data) => {
+      fetchTokens();
+      const customerInfo = data.customerName ? `${data.customerName}${data.customerEmail ? ` (${data.customerEmail})` : ''}` : '';
+      pushToast(`New ticket ${data.ticketNumber} from ${customerInfo || 'Customer'}`, "info");
+      addNotif("info", `Token ${data.ticketNumber} requested — ${customerInfo || 'Walk-in customer'}`);
+    });
+
+    socketRef.current.on("TOKEN_STATUS_CHANGE", (data) => {
+      fetchTokens();
+    });
+
+    socketRef.current.on("NEW_CUSTOMER_REGISTERED", (data) => {
+      const name = data.customerName || "Unknown";
+      const email = data.customerEmail || "";
+      pushToast(`New customer registered: ${name}${email ? ` (${email})` : ''}`, "info");
+      addNotif("info", `New registration — ${name}${email ? ` · ${email}` : ''}`);
+    });
+
+    return () => {
+      if (socketRef.current) socketRef.current.disconnect();
+    };
+  }, [dbCounterId]);
+
+  // Fetch tokens from backend
+  const fetchTokens = async () => {
+    if (!dbCounterId) return;
+    try {
+      const r = await fetch(`${API}/staff/tokens/${dbCounterId}`);
+      const d = await r.json();
+      if (d.success) {
+        const formatted = d.data.map(t => ({
+          id: t.token_number || `T${t.token_id}`,
+          token_id: t.token_id,
+          customer: t.customer_name || "Customer",
+          customer_email: t.customer_email || "",
+          status: t.status,
+          time: new Date(t.created_at || Date.now()).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"}),
+          priority: false,
+          note: "",
+        }));
+        setTokens(formatted);
+      }
+    } catch (e) {
+      console.error("Failed to fetch tokens", e);
+    }
+  };
+
+  // Load tokens on mount and when dbCounterId changes
+  useEffect(() => {
+    if (dbCounterId) fetchTokens();
+  }, [dbCounterId]);
+
+  // Poll for new tokens every 10 seconds
+  useEffect(() => {
+    if (!dbCounterId) return;
+    const iv = setInterval(fetchTokens, 10000);
+    return () => clearInterval(iv);
+  }, [dbCounterId]);
 
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000);
@@ -387,33 +434,62 @@ function StaffDashboard({ staff, onLogout }) {
     : filter === "waiting" ? sortedWaiting
     : tokens.filter(t=>t.status===filter);
 
-  const updateStatus = (id, status) => {
-    setTokens(p => p.map(t => t.id===id ? {...t, status} : t));
-    const tok = tokens.find(t=>t.id===id);
-    pushToast(`${id} marked as ${STATUS_META[status].label}`);
-    addNotif(status==="completed"?"success":"info", `Token ${id} (${tok?.customer}) → ${STATUS_META[status].label}`);
+  const updateStatus = async (id, status) => {
+    const tok = tokens.find(t => t.id === id);
+    try {
+      await fetch(`${API}/staff/tokens/${tok?.token_id}/${status}`, { method: "PUT" });
+      setTokens(p => p.map(t => t.id===id ? {...t, status} : t));
+      pushToast(`${id} marked as ${STATUS_META[status].label}`);
+      addNotif(status==="completed"?"success":"info", `Token ${id} (${tok?.customer}) → ${STATUS_META[status].label}`);
+    } catch (e) {
+      pushToast("Update failed", "error");
+    }
   };
 
   const callNext = () => {
     const next = sortedWaiting[0];
     if (!next) { pushToast("No customers waiting", "info"); return; }
-    setTokens(p => p.map(t =>
-      t.id===next.id ? {...t, status:"serving"} :
-      t.status==="serving" ? {...t, status:"completed"} : t
-    ));
+
+    // Auto-complete current serving
+    if (serving) {
+      fetch(`${API}/staff/tokens/${serving.token_id}/completed`, { method: "PUT" }).catch(() => {});
+    }
+    // Mark next as serving
+    fetch(`${API}/staff/tokens/${next.token_id}/serving`, { method: "PUT" })
+      .then(() => fetchTokens())
+      .catch(() => {});
     pushToast(`Now serving ${next.id} — ${next.customer}`, "info");
     addNotif("info", `Token ${next.id} called — ${next.customer}`);
   };
 
   const generateToken = () => {
     if (!newTok.customer.trim()) { pushToast("Enter customer name", "error"); return; }
-    const seq   = tokens.length + 1;
-    const id    = `${staff.counter}-${String(seq).padStart(3,"0")}`;
-    const now   = new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
-    const entry = { id, customer:newTok.customer, status:"waiting", time:now, priority:newTok.priority, note:newTok.note };
-    setTokens(p => [...p, entry]);
-    addNotif("success", `Token ${id} generated for ${newTok.customer}${newTok.priority?" (Priority)":""}`);
-    pushToast(`Token ${id} generated`);
+    if (!dbCounterId) { pushToast("Counter not configured", "error"); return; }
+
+    fetch(`${API}/request-token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customer_id: 1,
+        counter_id: dbCounterId,
+        token_type_id: 1,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          const now = new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
+          const entry = { id: data.token_number, customer: newTok.customer, status:"waiting", time: now, priority: newTok.priority, note: newTok.note };
+          setTokens(p => [...p, entry]);
+          addNotif("success", `Token ${data.token_number} generated for ${newTok.customer}${newTok.priority?" (Priority)":""}`);
+          pushToast(`Token ${data.token_number} generated`);
+          fetchTokens();
+        } else {
+          pushToast("Failed to create token", "error");
+        }
+      })
+      .catch(() => pushToast("Server error", "error"));
+
     setNewTok({ customer:"", priority:false, note:"" });
     setShowModal(false);
   };
@@ -557,6 +633,7 @@ function StaffDashboard({ staff, onLogout }) {
               </div>
               <div style={{ fontSize:34, fontWeight:900, marginTop:4, letterSpacing:"-1px" }}>{serving.id}</div>
               <div style={{ fontSize:15, color:"rgba(255,255,255,.85)", marginTop:2 }}>{serving.customer}</div>
+              {serving.customer_email && <div style={{ fontSize:11, color:"rgba(255,255,255,.5)", marginTop:1 }}>{serving.customer_email}</div>}
               {serving.note && <div style={{ fontSize:12, color:C.amber, marginTop:4 }}>📝 {serving.note}</div>}
               {serving.priority && (
                 <div style={{
@@ -658,7 +735,7 @@ function StaffDashboard({ staff, onLogout }) {
             <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
               <thead>
                 <tr style={{ background:C.navyDeep, color:C.white }}>
-                  {["Token ID","Customer","Time","Priority","Note","Status"].map(h=>(
+                  {["Token ID","Customer","Email","Time","Priority","Note","Status"].map(h=>(
                     <th key={h} style={{ padding:"12px 16px", textAlign:"left", fontSize:11, fontWeight:600, letterSpacing:".5px" }}>{h}</th>
                   ))}
                 </tr>
@@ -668,6 +745,7 @@ function StaffDashboard({ staff, onLogout }) {
                   <tr key={t.id} style={{ borderBottom:`1px solid ${C.slate}`, background:i%2===0?C.white:"#FAFBFD" }}>
                     <td style={{ padding:"12px 16px", fontWeight:700, color:C.navyMid }}>{t.id}</td>
                     <td style={{ padding:"12px 16px" }}>{t.customer}</td>
+                    <td style={{ padding:"12px 16px", color:C.gray, fontSize:11 }}>{t.customer_email||"—"}</td>
                     <td style={{ padding:"12px 16px", color:C.gray, fontVariantNumeric:"tabular-nums" }}>{t.time}</td>
                     <td style={{ padding:"12px 16px" }}>{t.priority?<span style={{ color:C.red, fontWeight:700, fontSize:11 }}>⚑ Yes</span>:<span style={{ color:C.gray, fontSize:11 }}>—</span>}</td>
                     <td style={{ padding:"12px 16px", color:C.gray, fontSize:12 }}>{t.note||"—"}</td>
@@ -675,7 +753,7 @@ function StaffDashboard({ staff, onLogout }) {
                   </tr>
                 ))}
                 {completed.length+skipped.length===0&&!serving&&(
-                  <tr><td colSpan={6} style={{ padding:32, textAlign:"center", color:C.gray }}>No completed tokens yet today.</td></tr>
+                  <tr><td colSpan={7} style={{ padding:32, textAlign:"center", color:C.gray }}>No completed tokens yet today.</td></tr>
                 )}
               </tbody>
             </table>
@@ -840,6 +918,7 @@ function TokenRow({ token, pos, onStatus, isServing, counterColor }) {
           )}
         </div>
         <div style={{ fontSize:13, color:C.navyMid, marginTop:2 }}>{token.customer}</div>
+        {token.customer_email && <div style={{ fontSize:10, color:C.gray }}>{token.customer_email}</div>}
         <div style={{ fontSize:11, color:C.gray, marginTop:1 }}>
           {token.time}{token.note?` · 📝 ${token.note}`:""}
         </div>
