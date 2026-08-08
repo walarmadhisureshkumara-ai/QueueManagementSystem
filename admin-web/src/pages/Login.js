@@ -72,7 +72,9 @@ const styles = {
     display: "flex",
     justifyContent: "center",
     alignItems: "center",
-    background: "linear-gradient(135deg, #1e3c72, #2a5298)"
+    backgroundImage: "url(/image.png)",
+    backgroundSize: "cover",
+    backgroundPosition: "center"
   },
 
   card: {
